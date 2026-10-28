@@ -1184,11 +1184,12 @@ pub struct Window {
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
-    mouse_position: Point<Pixels>,
+    pub(crate) mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
+    pub(crate) zoom: f32,
     pub(crate) bounds_observers: SubscriberSet<(), AnyObserver>,
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SubscriberSet<(), AnyObserver>,
@@ -2053,6 +2054,7 @@ impl Window {
             modifiers,
             capslock,
             scale_factor,
+            zoom: 1.0,
             bounds_observers: SubscriberSet::new(),
             appearance,
             appearance_observers: SubscriberSet::new(),
@@ -2364,7 +2366,7 @@ impl Window {
     /// surface be moved out of others' exclusive zones, and -1 ignores reserved
     /// space and may extend under other surfaces. (Wayland layer-shell windows only)
     pub fn set_exclusive_zone(&self, zone: Pixels) {
-        self.platform_window.set_exclusive_zone(zone);
+        self.platform_window.set_exclusive_zone(crate::fast::zoom::exclusive_zone(zone, self.zoom));
     }
 
     /// Set which anchored edge a layer-shell surface's exclusive zone applies to.
@@ -2390,7 +2392,7 @@ impl Window {
     /// - `Some(&[])` is an empty region, so the window receives no pointer or touch input.
     /// - `None` resets the region to the default, so the whole window receives input again.
     pub fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
-        self.platform_window.set_input_region(region);
+        self.zoom_input_region(region);
     }
 
     /// Return the `WindowBounds` to indicate that how a window should be opened
@@ -2668,9 +2670,9 @@ impl Window {
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
         self.scale_factor = self.platform_window.scale_factor();
-        self.viewport_size = self.platform_window.content_size();
+        self.viewport_size = crate::fast::zoom::from_platform(self.platform_window.content_size(), self.zoom);
         self.display_id = self.platform_window.display().map(|display| display.id());
-        self.mouse_position = self.platform_window.mouse_position();
+        self.mouse_position = crate::fast::zoom::from_platform(self.platform_window.mouse_position(), self.zoom);
 
         self.refresh();
 
@@ -2704,7 +2706,7 @@ impl Window {
 
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
-        self.platform_window.resize(size);
+        self.platform_window.resize(crate::fast::zoom::to_platform(size, self.zoom));
     }
 
     /// Returns whether or not the window is currently fullscreen
@@ -2749,7 +2751,7 @@ impl Window {
     /// During drawing this is a consistent frame snapshot. Outside drawing it
     /// reflects the latest platform sample, not a synchronous geometry query.
     pub fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
-        self.platform_window.visual_viewport_bounds()
+        crate::fast::zoom::from_platform(self.platform_window.visual_viewport_bounds(), self.zoom)
     }
 
     /// Returns a conservative rectangle avoiding platform-known obscured content.
@@ -2757,7 +2759,7 @@ impl Window {
     /// Intersects the visual viewport with the full layout area inset by system
     /// safe areas and keyboard occlusion. Unknown overlays cannot be excluded.
     pub fn fully_visible_bounds(&self) -> Bounds<Pixels> {
-        let insets = self.platform_window.insets().effective();
+        let insets = crate::fast::zoom::design_insets(self.platform_window.insets().effective(), self.zoom);
         let viewport = self.viewport_size();
         let left = insets.left.max(Pixels::ZERO).min(viewport.width);
         let top = insets.top.max(Pixels::ZERO).min(viewport.height);
@@ -2810,7 +2812,7 @@ impl Window {
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
     pub fn show_window_menu(&self, position: Point<Pixels>) {
-        self.platform_window.show_window_menu(position)
+        self.platform_window.show_window_menu(crate::fast::zoom::to_platform(position, self.zoom))
     }
 
     /// Handle window movement for Linux and macOS.
@@ -2824,7 +2826,7 @@ impl Window {
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
     pub fn set_client_inset(&mut self, inset: Pixels) {
         self.client_inset = Some(inset);
-        self.platform_window.set_client_inset(inset);
+        self.platform_window.set_client_inset(crate::fast::zoom::to_platform(inset, self.zoom));
     }
 
     /// Returns the client_inset value by [`Self::set_client_inset`].
@@ -2861,7 +2863,7 @@ impl Window {
     /// Sets the position of the macOS traffic light buttons.
     #[cfg(target_os = "macos")]
     pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
-        self.platform_window.set_traffic_light_position(position);
+        self.platform_window.set_traffic_light_position(crate::fast::zoom::to_platform(position, self.zoom));
     }
 
     /// Sets the application identifier.
@@ -2903,7 +2905,7 @@ impl Window {
     /// return 2.0 for a "retina" display, indicating that each logical pixel should actually
     /// be rendered as two pixels on screen.
     pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
+        self.scale_factor * self.zoom
     }
 
     /// Overrides the display scale factor for tests.
@@ -3499,7 +3501,7 @@ impl Window {
             // and frame are still in scope.
             let frame_info = crate::window::a11y::debug::FrameDebugInfo {
                 viewport_size: self.viewport_size,
-                scale_factor: self.scale_factor,
+                scale_factor: self.scale_factor(),
                 tab_stop_count: self.next_frame.tab_stops.tab_stop_count(),
             };
             // clear the builder state regardless
@@ -5344,6 +5346,7 @@ impl Window {
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
+        let event = crate::fast::zoom::design_event(event, self.zoom);
         let update_count_before = self.invalidator.update_count();
         // Track input modality for focus-visible styling and hover suppression.
         // Hover is suppressed during keyboard modality so that keyboard navigation
@@ -6374,7 +6377,7 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 if let Some(bounds) = input_handler.selected_bounds(window, cx) {
-                    window.platform_window.update_ime_position(bounds);
+                    window.platform_window.update_ime_position(crate::fast::zoom::to_platform(bounds, window.zoom));
                 }
                 window.platform_window.set_input_handler(input_handler);
             }
@@ -6765,7 +6768,7 @@ impl Window {
         match request.action {
             accesskit::Action::Click => {
                 if let Some(bounds) = self.a11y.node_bounds.get(&request.target_node).copied() {
-                    let center = bounds.center();
+                    let center = crate::fast::zoom::to_platform(bounds.center(), self.zoom);
                     let mouse_down = PlatformInput::MouseDown(crate::MouseDownEvent {
                         button: MouseButton::Left,
                         position: center,

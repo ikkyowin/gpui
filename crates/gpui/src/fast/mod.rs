@@ -28,6 +28,7 @@ pub(crate) mod stats;
 #[cfg(any(test, feature = "test-api"))]
 pub(crate) mod test_api;
 pub(crate) mod text;
+pub(crate) mod zoom;
 
 #[cfg(test)]
 mod tests;
