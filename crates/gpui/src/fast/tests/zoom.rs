@@ -17,6 +17,59 @@ struct ZoomProbe {
     wheel: Rc<RefCell<Option<crate::Point<Pixels>>>>,
 }
 
+struct RenderZoomProbe {
+    requested_zoom: Rc<Cell<Option<f32>>>,
+    bounds: ScrollHandle,
+}
+
+impl Render for RenderZoomProbe {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if let Some(zoom) = self.requested_zoom.take() {
+            window.set_zoom(zoom);
+        }
+        div()
+            .id("render-zoom-root")
+            .size_full()
+            .track_scroll(&self.bounds)
+    }
+}
+
+#[test]
+fn window_zoom_during_render_updates_next_frame_layout() {
+    let mut cx = TestAppContext::single();
+    let requested_zoom = Rc::new(Cell::new(None));
+    let bounds = ScrollHandle::new();
+    let handle = cx.add_window({
+        let requested_zoom = requested_zoom.clone();
+        let bounds = bounds.clone();
+        move |_, _| RenderZoomProbe {
+            requested_zoom,
+            bounds,
+        }
+    });
+    let mut test_window = cx.test_window(handle.into());
+    test_window.simulate_active_status_change(true);
+    test_window.simulate_scale_factor_change(1.);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.resize(size(px(1000.), px(1000.)));
+        window.bounds_changed(cx);
+    })
+    .expect("test window update");
+    test_window.simulate_scheduled_frame();
+    assert_eq!(bounds.bounds().size, size(px(1000.), px(1000.)));
+
+    requested_zoom.set(Some(0.5));
+    cx.update_window(handle.into(), |_, window, _| window.refresh())
+        .expect("schedule zoom render");
+    test_window.simulate_scheduled_frame();
+    test_window.simulate_scheduled_frame();
+    assert_eq!(
+        bounds.bounds().size,
+        size(px(2000.), px(2000.)),
+        "the frame scheduled by a render-time zoom must use the new viewport"
+    );
+}
+
 impl Render for ZoomProbe {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let hits = self.hits.clone();

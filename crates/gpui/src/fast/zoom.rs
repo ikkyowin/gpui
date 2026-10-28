@@ -32,6 +32,10 @@ impl Window {
             self.set_client_inset(inset);
         }
         self.refresh();
+        if !self.invalidator.not_drawing() {
+            // This frame captured its root size before render changed the zoom.
+            self.invalidator.set_dirty(true);
+        }
     }
 
     pub(crate) fn zoom_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
